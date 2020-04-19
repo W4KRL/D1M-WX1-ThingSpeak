@@ -60,8 +60,6 @@ const float HPA_TO_INHG = 0.0295299830714; // hPa (mb) to inHg pressure
 String unitStatus = "";                    // for weather station status
 bool rtcValid = false;                     // RTC check of validity
 long startTime = millis();                 // record processor time when awakened
-// set APRS telemetry span for number of seconds to xmit header
-const int APRS_DEF_SPAN = APRS_TELEM_SPAN / SLEEP_INTERVAL;     // determines how often APRS definitions are sent
 
 // structure to hold sensor measurements/calculations
 struct {
