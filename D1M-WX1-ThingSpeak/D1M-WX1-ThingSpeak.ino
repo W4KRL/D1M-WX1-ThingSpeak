@@ -1,15 +1,14 @@
-/* D1M-WX1-APRS-ThingSpeak.ino
+/* D1M-WX1-ThingSpeak.ino
    D1 Mini Weather Station (Solar)
-   Posts to APRS-IS and ThingSpeak using the REST API
+   Posts to ThingSpeak using the REST API
    BH1750 range extended to 121,557 lux with Armborst library
-   APRS-IS using range 0-999 for analog channels (undocumented)
+
    Set serial monitor to 115,200 baud
-   04/06/2020 - simplified APRS pad functions using sprintf
+   04/19/2020 - reduced from D1M-WX1-APRS-ThingSpeak
    04/05/2020 - Armborst BH1750 library with extended range, changed sleep to WAKE_DEFAULT
               - simplified code in PostToThingSpeak
    09/20/2019 - changed low RSSI to -85 dBm, moved MIN_RSSI to ThingSpeak_config.h
-   07/18/2018 - Modify Delta to use RTC memory for telemetry sequence number
-              - Added https://www.bakke.online/index.php/2017/06/24/esp8266-wifi-power-reduction-avoiding-network-scan/
+   07/18/2018 - Added https://www.bakke.online/index.php/2017/06/24/esp8266-wifi-power-reduction-avoiding-network-scan/
    TO DO:
       Add wifiManager
       Add Over The Air update
@@ -46,21 +45,13 @@
 #include <BME280I2C.h>               // Tyler Glenn https://github.com/finitespace/BME280
 
 // Place your configuration files in same folder as this sketch
-#include "APRS_config.h"
+#include "ThingSpeak_config.h"
 
 // *******************************************************
 // ********************** DEFAULTS ***********************
 // *******************************************************
 // !!!!!!      DO NOT CHANGE THESE DEFAULTS         !!!!!!
 const String IOT_SERVER = "api.thingspeak.com";           // ThingSpeak Server
-// for list of tier 2 servers: http://www.aprs-is.net/aprsservers.aspx
-const String APRS_SERVER = "rotate.aprs2.net";            // recommended since May 2018
-const String APRS_DEVICE_NAME = "https://w4krl.com/iot-kits/";
-const String APRS_SOFTWARE_NAME = "D1M-WX1";              // unit ID
-const String APRS_SOFTWARE_VERS = "3.0";                  // firmware version
-const int    APRS_PORT = 14580;                           // do not change port
-const long   APRS_TIMEOUT = 2000;                         // milliseconds
-const String APRS_PROJECT = "Solar Power WX Station";     // telemetry ID
 
 // *******************************************************
 // *********************** GLOBALS ***********************
@@ -128,7 +119,7 @@ void setup() {
   readRTCmemory();               // get APRS sequence number & WiFi channel info
   logonToRouter();               // logon to local Wi-Fi
   checkAlarms();                 // compare alarms with previous state
-  postToAPRS();                  // send data to APRS-IS
+
   postToThingSpeak();            // send data to ThingSpeak
   // TODO: could set Wi-Fi OFF at this point
   writeRTCmemory();              // save APRS sequence & WiFi channel info
@@ -391,69 +382,6 @@ void checkAlarms() {
 } // checkAlarms()
 
 // *******************************************************
-// **************** Post data to APRS-IS *****************
-// *******************************************************
-void postToAPRS() {
-  // See http://www.aprs-is.net/Connecting.aspx
-  String dataString = "";
-  if ( client.connect(APRS_SERVER, APRS_PORT) ) {
-    Serial.println("APRS connected.");
-  } else {
-    Serial.println("APRS connection failed.");
-  }
-  if ( client.connected() ) {
-    String rcvLine = client.readStringUntil('\n');
-    Serial.print("Rcvd: "); Serial.println(rcvLine);
-    if ( rcvLine.indexOf("full") > 0 ) {
-      Serial.println("APRS port full. Retrying.");
-      client.stop();  // disconnect from port
-      delay(500);
-      client.connect(APRS_SERVER, APRS_PORT);
-    }
-    // send APRS-IS logon info
-    dataString = "user " + APRS_CALLSIGN + " pass " + APRS_PASSCODE;
-    dataString += " vers IoT-Kits " + APRS_SOFTWARE_VERS; // softwarevers
-    client.println(dataString);       // send to APRS-IS
-    Serial.print("Send: ");
-    Serial.println(dataString);
-
-    if ( APRSverified() == true ) {
-      Serial.println("APRS Login ok.");
-      APRSsendWeather();
-      APRSsendTelemetry();
-      rtcData.aprsSequence++;         // increment APRS sequence number
-      client.stop();                  // disconnect from APRS-IS server
-      Serial.println("APRS done.");
-    } else {
-      Serial.println("APRS user not verified.");
-      unitStatus += "APRS user not verified. ";
-    } // if APRSverified
-  } // if client.connected
-} // postToAPRS()
-
-// *******************************************************
-// **************** Verify logon to APRS-IS **************
-// *******************************************************
-boolean APRSverified() {
-  boolean verified = false;
-  unsigned long timeBegin = millis();
-  while ( millis() - timeBegin < APRS_TIMEOUT ) {
-    String rcvLine = client.readStringUntil('\n');
-    Serial.print("Rcvd: ");
-    Serial.println(rcvLine);
-    if ( rcvLine.indexOf("verified") > 0 ) {
-      if ( rcvLine.indexOf("unverified") == -1 ) {
-        // "unverified" not found so we are in
-        verified = true;
-        break;
-      }
-    }
-    delay(100);
-  }
-  return verified;
-} // APRSverified()
-
-// *******************************************************
 // ********** Post data to ThingSpeak ********************
 // *******************************************************
 void postToThingSpeak() {
@@ -503,331 +431,6 @@ float calculateSeaLevelPressure(float celsius, float stationPressure, float elev
   float slP = stationPressure / pow(2.718281828, -(elevation / ((273.15 + celsius) * 29.263)));
   return slP;
 } // calculateSeaLevelPressure()
-
-// *******************************************************
-// ************** Send weather data to APRS-IS ***********
-// *******************************************************
-// page 65 http://www.aprs.org/doc/APRS101.PDF
-// Using Complete Weather Report Format â€” with Lat/Long position, no Timestamp
-void APRSsendWeather() {
-  String dataString = APRS_CALLSIGN;
-  dataString += ">APRS,TCPIP*:";
-  dataString += "!" + APRSlocation(LATITUDE, LONGITUDE);
-  dataString += "_";               // required symbol code
-  //  dataString += ".../...g..."; // no wind data
-  dataString += ".../...";         // no wind data
-  dataString += "t" + APRSpadTempF(sensorData.fahrenheit);
-  //  dataString += "p...P...";    // no rainfall data
-  dataString += "h" + APRSpadHumid(sensorData.humidity);
-  dataString += "b" + APRSpadBaro(sensorData.seaLevelPressure);
-  dataString += APRS_DEVICE_NAME;
-  dataString += " ";
-  dataString += APRS_SOFTWARE_VERS;
-  client.println(dataString);      // send to APRS-IS
-
-  Serial.print("Send: ");
-  Serial.println(dataString);      // print to serial port
-} // APRSsendWeather()
-
-// *******************************************************
-// ************* Send telemetry data to APRS *************
-// *******************************************************
-// page 68 http://www.aprs.org/doc/APRS101.PDF
-void APRSsendTelemetry() {
-  String dataString = APRS_CALLSIGN;
-  // start telemetry messages
-  dataString += ">APRS,TCPIP*:";
-  dataString += "T#" + APRSpadSequence(rtcData.aprsSequence);
-  dataString += "," + APRSpadVcell(sensorData.cellVoltage);          // channel A1
-  dataString += "," + APRSpadRSSI(sensorData.wifiRSSI);              // channel A2
-  dataString += "," + APRSpadLightIntensity(sensorData.lightLevel);  // channel A3
-  dataString += "," + APRSpadTimeAwake(rtcData.timeAwake);           // channel A4
-  dataString += ",";                                                 // channel A5 (spare)
-  dataString += ",";                                                 // move on to digital channels
-  if ( sensorData.bme280Fail == true ) {
-    dataString += "0";
-  } else {
-    dataString += "1";
-  }
-  if ( sensorData.bh1750Fail == true ) {
-    dataString += "0";
-  } else {
-    dataString += "1";
-  }
-  if ( sensorData.lowVcell == true ) {
-    dataString += "0";
-  } else {
-    dataString += "1";
-  }
-  if ( sensorData.lowRSSI == true ) {
-    dataString += "0";
-  } else {
-    dataString += "1";
-  }
-  //  dataString += "0000";                 // unused digital channels
-  dataString += "," + APRS_PROJECT;         // Project Title 0 - 23 characters
-  client.println(dataString);               // send to APRS-IS
-
-  Serial.print("Send: ");
-  Serial.println( dataString );               // print to serial port
-
-  // send telemetry definitions every TELEM_SPAN cycles
-  if ( rtcData.aprsSequence % APRS_DEF_SPAN == 0 ) {
-    APRSsendTelemetryDefinitions( APRS_CALLSIGN );
-    String msg = "APRS telemetry definitions sent with sequence #";
-    msg += rtcData.aprsSequence;
-    Serial.println( msg );
-    unitStatus += msg + " ";
-  }
-} // APRSsendTelemetry()
-
-// *******************************************************
-// *********** Send APRS telemetry definitions ***********
-// *******************************************************
-void APRSsendTelemetryDefinitions(String callsign) {
-  String APRStelemHeader = callsign + ">APRS,TCPIP*::" + APRSpadCall(callsign) + ":";
-  // PARM - parameters
-  String dataString = APRStelemHeader;
-  //             Parameter Name   channel (number of characters)
-  //             ==============   ======= ======================
-  dataString += "PARM.";
-  dataString += "Vcell";            // A1 (1-7)
-  dataString += ",RSSI";            // A2 (1-7)
-  dataString += ",Light";           // A3 (1-6)
-  dataString += ",Awake";           // A4 (1-6)
-  dataString += ",";                // A5 (1-5) spare
-  dataString += ",BME28";           // B1 (1-6)
-  dataString += ",BH17";            // B2 (1-5)
-  dataString += ",loV";             // B3 (1-4)
-  dataString += ",loS";             // B4 (1-4)
-  //dataString += ",pB5";           // B5 (1-4) spare
-  //dataString += ",pB6";           // B6 (1-3) spare
-  //dataString += ",pB7";           // B7 (1-3) spare
-  //dataString += ",pB8";           // B8 (1-3) spare
-  client.println(dataString);       // send to APRS-IS
-
-  Serial.print("Send: ");
-  Serial.println(dataString);       // print to serial port
-
-  // UNIT - parameter units
-  dataString = APRStelemHeader;
-  dataString += "UNIT.";
-  dataString += "Vdc";              // A1 (1-7)
-  dataString += ",dBm";             // A2 (1-7)
-  dataString += ",lux";             // A3 (1-6)
-  dataString += ",secs";            // A4 (1-6)
-  dataString += ",";                // A5 (1-5) spare
-  dataString += ",OK";              // B1 (1-6)
-  dataString += ",OK";              // B2 (1-5)
-  dataString += ",OK";              // B3 (1-4)
-  dataString += ",OK";              // B4 (1-4)
-  //  dataString += ",uB5";         // B5 (1-4) spare
-  //  dataString += ",uB6";         // B6 (1-3) spare
-  //  dataString += ",uB7";         // B7 (1-3) spare
-  //  dataString += ",uB8";         // B8 (1-3) spare
-  client.println(dataString);       // send to APRS-IS
-
-  Serial.print("Send: ");
-  Serial.println(dataString);       // print to serial port
-
-  // EQNS - equations to convert analog data byte to parameter value
-  // formula: A * X^2 + B * X + C
-  dataString = APRStelemHeader;
-  dataString += "EQNS.";
-  dataString += "0,0.0025,2.5";     // A1 convert 0-999 to 2.5-4.9975 v
-  dataString += ",0,-1,0";          // A2 convert |RSSI| to dBm
-  dataString += ",0.1218,0,0";      // A3 convert 0-999 to 0-121,557 lux
-  dataString += ",0,0.025,0";       // A4 convert 0-999 to 0-24.975 seconds
-  //  dataString += ",0,0,0";       // A5 (spare)
-  client.println(dataString);       // send to APRS-IS
-
-  Serial.print("Send: ");
-  Serial.println(dataString);       // print to serial port
-
-  // BITS - digital data and project identity
-  dataString = APRStelemHeader;
-  dataString += "BITS.";
-  //  dataString += "00000000";     // bits are set in APRSsendTelemetry()
-  //  dataString += ",";
-  dataString += APRS_PROJECT;       // 23 char max
-  client.println(dataString);       // send to APRS-IS
-
-  Serial.print("Send: ");
-  Serial.println(dataString);       // print to serial port
-} // APRSsendTelemetryDefinitions()
-
-// *******************************************************
-// *********** Format callsign for APRS telemetry ********
-// *******************************************************
-// max length with SSID is 9, for ex.: WA3YST-13
-// this pads a short call with spaces to the right
-String APRSpadCall(String callSign) {
-  int len = callSign.length();    // number of characters in callsign
-  String dataString = callSign;   // initialize dataString with callsign
-  for (int i = len; i < 9; i++) {
-    dataString += " ";            // pad right with spaces
-  }
-  return dataString;
-}  // APRSpadCall()
-
-// *******************************************************
-// *************** Format location for APRS **************
-// *******************************************************
-String APRSlocation(float lat, float lon) {
-  // NOTE: abs() and % DO NOT WORK WITH FLOATS!!!
-  // use fmod() for float modulo
-  // convert decimal latitude & longitude to DDmm.mmN/DDDmm.mmW
-  String locStr = "";             // assembled APRS location string
-  String latID  = "";             // North/South marker
-  String lonID  = "";             // East/West marker
-  // process latitude
-  if ( lat > 0 ) {
-    latID = "N/";
-  } else {
-    latID = "S/";
-    lat = -lat;     // take absolute value
-  }
-  if ( lat < 10 ) locStr = "0";   // pad to two places
-  if ( lat <  1 ) locStr += "0";
-  // shift the integer part of the latitude to the left two digits
-  // by multiplying by 100
-  // find fractional part as remainder of division by 1 (fmod)
-  // convert fractional part to minutes and add to shifted integer part
-  // truncate to 2 decimal places
-  locStr += String( 100 * (int)lat + 60.0 * fmod(lat, 1), 2 );
-  locStr += latID;
-
-  // process longitude
-  if ( lon > 0 ) {
-    lonID = "E";
-  } else {
-    lonID = "W";
-    lon = -lon;      // take absolute value
-  }
-  if ( lon < 100 ) locStr += "0"; // pad to 3 places
-  if ( lon <  10 ) locStr += "0";
-  if ( lon <   1 ) locStr += "0";
-  locStr += String( 100 * (int)lon + 60.0 * fmod(lon, 1), 2 );
-  locStr += lonID;
-
-  return locStr;
-} // APRSlocation()
-
-// *******************************************************
-// ****** Format temperature in Fahrenheit for APRS ******
-// *******************************************************
-String APRSpadTempF(float tempF) {
-  String dataString = "";
-  int i = tempF + 0.5;    // round to integer temperature
-  if ( i > 999 ) i = 999; // limit is 999 F
-  if ( i < 0 ) {          // if temperature is below zero
-    dataString += "-";    // prefix with minus sign
-    i = -i;               // make value positive
-    if ( i > 99 )         // limit minimum temperature to -99Â°F
-      i = 99;
-    else if ( i < 10 )    // if between -1Â°F and -9Â°F
-      dataString += "0";  // pad with leading zero
-  } else {                // temperature is positive
-    if ( i < 100 ) dataString += "0";
-    if ( i <  10 ) dataString += "0";
-  }
-  dataString += i;        // value string goes to the right of the padding
-  return dataString;
-} // APRSpadTempF
-
-// *******************************************************
-// *************** Format humidity for APRS **************
-// *******************************************************
-String APRSpadHumid(float h) {
-  //  String dataString = "";
-  int b = h + 0.5;        // rounds up and converts to integer
-  if ( b > 99 ) {         // max APRS humidity is 99%
-    b = 0;                // APRS Protocol says 00 = 100%
-  }
-  char buf[3];
-  sprintf(buf, "%02d", b);
-  return buf;
-} // APRSpadHumid()
-
-// *******************************************************
-// *********** Format LiPo cell voltage for APRS *********
-// *******************************************************
-String APRSpadVcell(float vcell) {
-  //  String dataString = "";
-  int b = ( vcell - 2.5 ) * 400;  // convert 2.5 - 4.9975 to 0 - 999
-  char buf[4];
-  sprintf(buf, "%03d", b);
-  return buf;
-} // APRSpadVcell()
-
-// *******************************************************
-// ************** Format light level for APRS ************
-// *******************************************************
-String APRSpadLightIntensity(float lightLevel) {
-  // compress lux data by taking square root
-  // expand in APRS receiver by squaring
-  // see EQNS. in APRSsendTelemetryDefinitions
-  int CHANNEL_MAX = 999;    // max value of analog channel (not documented)
-  int VALUE_MAX = 121577;   // max value of BH1750
-
-  int b = CHANNEL_MAX * sqrt( lightLevel / VALUE_MAX );   // convert 0-121,557 to 0 - 999
-  char buf[4];
-  sprintf(buf, "%03d", b);
-  return buf;
-} // APRSpadLightIntensity()
-
-// *******************************************************
-// ************** Format WiFi RSSI for APRS **************
-// *******************************************************
-String APRSpadRSSI(long RSSI) {
-  // RSSI is always negative
-  byte b = -RSSI;             // change to positive value
-  char buf[4];
-  sprintf(buf, "%03d", b);
-  return buf;
-} // APRSpadRSSI()
-
-// *******************************************************
-// ********* Format sea level pressure for APRS **********
-// *******************************************************
-String APRSpadBaro(float barom) {
-  // pad barometric pressure in 10ths of hPa to 5 digits
-  unsigned int bar10 = barom * 10;    // convert to 10th of millibars
-  if ( bar10 > 99999 ) { // upper limit
-    bar10 = 99999;
-  }
-  char buf[6];
-  sprintf(buf, "%05d", bar10);
-  return buf;
-} // APRSpadBaro()
-
-// *******************************************************
-// ************** Format time awake for APRS *************
-// *******************************************************
-String APRSpadTimeAwake(float awake) {
-  // range is 0 to 24.975 seconds
-  // converted to 0 to 999
-  // multiplier = 999 / 24.975 = 40
-
-  int b = 0;
-  if ( awake > 24.975 ) {
-    awake = 24.975;
-  }
-  b = 40 * awake;
-  char buf[4];
-  sprintf(buf, "%03d", b);
-  return buf;
-} // APRSpadTimeAwake()
-
-// *******************************************************
-// ********* Pad Telemetry Sequence Number ***************
-// *******************************************************
-String APRSpadSequence(byte sequence) {
-  // pad the sequence number to three digits
-  char buf[4];
-  sprintf(buf, "%03d", sequence);
-  return buf;
-} // APRSpadSequence()
 
 // *******************************************************
 // *********************** END ***************************
