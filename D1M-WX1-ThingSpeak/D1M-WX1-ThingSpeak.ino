@@ -1,28 +1,37 @@
 /* D1M-WX1-ThingSpeak.ino
+
    D1 Mini Weather Station (Solar)
    Posts to ThingSpeak using the REST API
+
    BH1750 range extended to 121,557 lux with Armborst library
 
    Set serial monitor to 115,200 baud
-   04/19/2020 - reduced from D1M-WX1-APRS-ThingSpeak
+   
+   04/22/2020 - changed SLEEP_INERVAL to unsigned long
+   04/21/2020 - use sprintf in PrintToSerial
+   04/20/2020 - based on D1M-WX1-APRS-ThingsSpeak.ino with APRS code removed
    04/05/2020 - Armborst BH1750 library with extended range, changed sleep to WAKE_DEFAULT
               - simplified code in PostToThingSpeak
    09/20/2019 - changed low RSSI to -85 dBm, moved MIN_RSSI to ThingSpeak_config.h
-   07/18/2018 - Added https://www.bakke.online/index.php/2017/06/24/esp8266-wifi-power-reduction-avoiding-network-scan/
+   07/18/2018 - Modify Delta to use RTC memory for telemetry sequence number
+              - Added https://www.bakke.online/index.php/2017/06/24/esp8266-wifi-power-reduction-avoiding-network-scan/
    TO DO:
       Add wifiManager
       Add Over The Air update
 */
 /*_____________________________________________________________________________
-   Copyright 2016-2020 Berger Engineering dba IoT KitsÂ©
+   Copyright 2016-2020 Berger Engineering dba IoT Kits©
+
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
    in the Software without restriction, including without limitation the rights
    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
    copies of the Software, and to permit persons to whom the Software is
    furnished to do so, subject to the following conditions:
+
    The above copyright notice and this permission notice shall be included in all
    copies or substantial portions of the Software.
+
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -30,6 +39,7 @@
    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
    SOFTWARE.
+
    https://w4krl.com
    _____________________________________________________________________________
 */
@@ -41,10 +51,10 @@
 
 #include <Wire.h>                    // [builtin] I2C bus
 #include <ESP8266WiFi.h>             // [builtin] ESP8266 WiFi
-#include <hp_BH1750.h>               // [manager] by Stefan Armborst https://github.com/Starmbi/hp_BH1750
-#include <BME280I2C.h>               // Tyler Glenn https://github.com/finitespace/BME280
+#include <hp_BH1750.h>               // [manager] v1.0.0 by Stefan Armborst https://github.com/Starmbi/hp_BH1750
+#include <BME280I2C.h>               // [ZIP]     v2.3.0 by Tyler Glenn https://github.com/finitespace/BME280
 
-// Place your configuration files in same folder as this sketch
+// Place your configuration file in same folder as this sketch
 #include "ThingSpeak_config.h"
 
 // *******************************************************
@@ -65,8 +75,8 @@ long startTime = millis();                 // record processor time when awakene
 struct {
   float stationPressure;         // station pressure (hPa) (mb)
   float seaLevelPressure;        // calculated SLP (hPa)
-  float celsius;                 // temperature (Â°C)
-  float fahrenheit;              // calculated temperature (Â°F)
+  float celsius;                 // temperature (°C)
+  float fahrenheit;              // calculated temperature (°F)
   float humidity;                // relative humidity (%)
   float lightLevel;              // light intensity (lux)
   float cellVoltage;             // volts
@@ -87,7 +97,7 @@ struct {
   uint32_t  crc32;               // 4 bytes    4 total
   uint8_t   channel;             // 1 byte,    5 total
   uint8_t   bssid[6];            // 6 bytes,  11 total
-  uint8_t   aprsSequence;        // 1 byte,   12 total
+  uint8_t   aprsSequence;        // 1 byte,   12 total -- not used
   uint8_t   bme280Fail;          // 1 byte,   13 total
   uint8_t   bh1750Fail;          // 1 byte,   14 total
   uint8_t   lowVcell;            // 1 byte,   15 total
@@ -114,13 +124,12 @@ void setup() {
   initializeSensors();           // start BME280 and BH1750 sensors
   readSensors();                 // read data into sensorData struct
   printToSerialPort();           // display data on local serial monitor
-  readRTCmemory();               // get APRS sequence number & WiFi channel info
+  readRTCmemory();               // get sensor status and WiFi channel info
   logonToRouter();               // logon to local Wi-Fi
   checkAlarms();                 // compare alarms with previous state
-
   postToThingSpeak();            // send data to ThingSpeak
   // TODO: could set Wi-Fi OFF at this point
-  writeRTCmemory();              // save APRS sequence & WiFi channel info
+  writeRTCmemory();              // save sensor status and WiFi channel info
   enterSleep( SLEEP_INTERVAL );  // go to low power sleep mode
 } //setup()
 
@@ -139,12 +148,12 @@ void loop() {                    // there is nothing to do here
 // *******************************************************
 void initializeSensors() {
   // initialize BME280 pressure/temperature/humidity sensor
-  if ( myBME280.begin() == false ) {
+  if ( myBME280.begin() == false ) {  // BME280 did not initialize
     sensorData.bme280Fail = true;
     Serial.println( "BME280 sensor failure." );
   }
   // initialize BH1750 light sensor
-  if ( myBH1750.begin( BH1750_TO_GROUND ) == false ) {
+  if ( myBH1750.begin( BH1750_TO_GROUND ) == false ) {  // BH1750 did not initialize
     sensorData.bh1750Fail = true;
     Serial.println( "BH1750 sensor failure." );
   }
@@ -190,28 +199,30 @@ void readSensors() {
 // ************ Print data to the serial port ************
 // *******************************************************
 void printToSerialPort() {
-  // '\t' is the C++ escape sequence for tab
+  // copy sensor data into short variables for readability
+  float tc = sensorData.celsius;
+  float tf = sensorData.fahrenheit;
+  float rh = sensorData.humidity;
+  float sl = sensorData.seaLevelPressure;
+  float si = sl * HPA_TO_INHG;
+  float lx = sensorData.lightLevel;
+  float vc = sensorData.cellVoltage;
+  // buffer to store formatted print string
+  char buffer[60];  // must be >1 longer than string
+
   // header line
-  Serial.println("\n\tÂ°C(Â°F)\t\tRH%\tSP mb\tSLP(in)\t\tLux\tVolt");
+  Serial.println();
+  Serial.println("  °C   (°F)   RH%  SLP mb    (in)     Lux   Volt");
+
   // data line
-  Serial.print("Data\t");
-  Serial.print(sensorData.celsius, 1);
-  Serial.print("(");
-  Serial.print(sensorData.fahrenheit, 1);
-  Serial.print(")\t");
-  Serial.print(sensorData.humidity, 1);
-  Serial.print("\t");
-  Serial.print(sensorData.stationPressure, 1);
-  Serial.print("\t");
-  Serial.print(sensorData.seaLevelPressure, 1);
-  Serial.print("(");
-  Serial.print(sensorData.seaLevelPressure * HPA_TO_INHG, 2);
-  Serial.print(")\t");
-  Serial.print(sensorData.lightLevel, 1);
-  Serial.print("\t");
-  Serial.println(sensorData.cellVoltage, 2);
-  Serial.println( unitStatus );
-  Serial.println("----------------------------------------------------------------------------");
+  sprintf(buffer, "%3.1f (%3.1f)  %3.1f  %5.1f (%3.2f)  %6.0f   %2.2f", tc, tf, rh, sl, si, lx, vc);
+  Serial.println(buffer);
+  if (unitStatus == "") {
+    Serial.println("Unit status OK");
+  } else {
+    Serial.println( unitStatus );
+  }
+  Serial.println("-------------------------------------------------");
 } // printToSerialPort()
 
 
@@ -282,9 +293,9 @@ uint32_t calculateCRC32( const uint8_t *data, size_t length ) {
 // ************** Logon to your Wi-Fi router *************
 // *******************************************************
 void logonToRouter() {
-  WiFi.forceSleepWake();       // Bakke
+  WiFi.forceSleepWake();     // Bakke
   delay( 1 );
-  WiFi.persistent( false );    // prevent it from writing logon to flash memory
+  WiFi.persistent( false );  // prevent it from writing logon to flash memory
   WiFi.mode( WIFI_STA );
 
   int count = 0;
@@ -307,7 +318,7 @@ void logonToRouter() {
       // PROCESSING ENDS HERE IF IT FAILS TO CONNECT!!!
       // **********************************************
     }
-    delay( 100 );                     // ms delay between reports
+    delay( 100 );            // ms delay between reports
     Serial.print(".");
   } // loop while not connected
   // WiFi is sucesfully connected
@@ -323,13 +334,14 @@ void logonToRouter() {
 // *******************************************************
 // ********************* Enter Sleep *********************
 // *******************************************************
-void enterSleep(long sleep) {
+void enterSleep(unsigned long sleep) {
   WiFi.disconnect( true );
   delay( 1 );
   // sleep is in seconds
   Serial.print("Total time awake: ");
   Serial.println( rtcData.timeAwake );
   Serial.print("Entering deep sleep for ");
+
   Serial.print( sleep );
   Serial.println(" seconds.");
   // WAKE_RF_DEFAULT wakes with WiFi radio ON
@@ -398,14 +410,13 @@ void postToThingSpeak() {
     dataString += "&field7=" + String(sensorData.wifiRSSI);
     dataString += "&field8=" + String(sensorData.fahrenheit);
     dataString += "&status=" + unitStatus;
-    Serial.println(unitStatus);   // show status on local serial monitor
 
     // find the number of characters in dataString
     String dataStringLength = String(dataString.length());
 
     // post the data to ThingSpeak
     client.println("POST /update HTTP/1.1");
-    client.println("Host: api.thingspeak.com");
+    client.println("Host: " + IOT_SERVER);
     client.println("Connection: close");
     client.println("X-THINGSPEAKAPIKEY: " + API_WRITE_KEY);
     client.println("Content-Type: application/x-www-form-urlencoded");
@@ -421,7 +432,7 @@ void postToThingSpeak() {
 
 // *******************************************************
 // Calculate relative sea level pressure from absolute station pressure in hPa
-// temperature in Â°C, elevation in m
+// temperature in °C, elevation in m
 // http://www.sandhurstweather.org.uk/barometric.pdf
 // http://keisan.casio.com/exec/system/1224575267
 // *******************************************************
